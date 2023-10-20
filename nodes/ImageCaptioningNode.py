@@ -21,13 +21,12 @@ class ImageCaptioningNode:
         self.model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large").to("cuda")
 
     def caption(self, image):
-        image = image.numpy()
-        if image.ndim == 4:  # image has batch dimension
-            image = image[0]  # take first image in batch
-        image = Image.fromarray((image * 255).astype(np.uint8).transpose(1, 2, 0))
-        
+
+        i = 255. * image[0].cpu().numpy()
+        img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+      
         # Perform unconditional image captioning
-        inputs = self.processor(image, return_tensors="pt").to("cuda")
+        inputs = self.processor(img, return_tensors="pt").to("cuda")
         out = self.model.generate(**inputs)
         caption = self.processor.decode(out[0], skip_special_tokens=True)
 
