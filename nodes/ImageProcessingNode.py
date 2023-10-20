@@ -1,13 +1,19 @@
 import hashlib
 import fastapi
 import fastapi
-import torch, time
+import torch
+import time
 import io
+import cv2
 
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from torchvision import transforms
 import comfy.samplers
-from matplotlib import transforms
+import matplotlib.transforms as mpl_transforms
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageDraw, ImageChops, ImageFont
 import numpy as np
+from scipy.ndimage import zoom
+
 import comfy.model_management as model_management
 import json
 import uuid
@@ -18,8 +24,10 @@ import torch.nn as nn
 from os.path import join
 import clip
 import folder_paths
+
 # create path to aesthetic model.
-folder_paths.folder_names_and_paths["aesthetic"] = ([os.path.join(folder_paths.models_dir,"aesthetic")], folder_paths.supported_pt_extensions)
+folder_paths.folder_names_and_paths["aesthetic"] = ([os.path.join(
+    folder_paths.models_dir, "aesthetic")], folder_paths.supported_pt_extensions)
 
 
 aspect_ratios = [
@@ -33,30 +41,233 @@ aspect_ratios = [
 MAX_RESOLUTION = 10240  # adjust this value as needed
 
 # Tensor to PIL
+
+
 def tensor2pil(image):
     return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
-    
+
 # PIL to Tensor
+
+
 def pil2tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
 # PIL Hex
+
+
 def pil2hex(image):
     return hashlib.sha256(np.array(tensor2pil(image)).astype(np.uint16).tobytes()).hexdigest()
 
 # PIL to Mask
+
+
 def pil2mask(image):
     image_np = np.array(image.convert("L")).astype(np.float32) / 255.0
     mask = torch.from_numpy(image_np)
     return 1.0 - mask
-    
+
 # Mask to PIL
+
+
 def mask2pil(mask):
     if mask.ndim > 2:
         mask = mask.squeeze(0)
     mask_np = mask.cpu().numpy().astype('uint8')
     mask_pil = Image.fromarray(mask_np, mode="L")
     return mask_pil
+
+
+def scale_and_print_mask(mask, target_shape=(11, 11)):
+    """
+    Scale a given mask to a target shape and print it rounded to 4 decimal places.
+    """
+    # Calculate scaling factors
+    scale_x = target_shape[0] / mask.shape[0]
+    scale_y = target_shape[1] / mask.shape[1]
+
+    # Rescale the mask
+    scaled_mask = zoom(mask, (scale_x, scale_y))
+
+    # Print the scaled mask, rounded to 4 decimal places
+    for row in scaled_mask:
+        print(", ".join([f"{x:.2f}" for x in row]))
+
+
+def apply_feathering(mask, feathering_distance=10):
+    # Apply Gaussian blur to the mask
+    mask_feathered = mask
+
+    if feathering_distance > 0:
+        # Generate kernel
+        kernel_size = 2 * feathering_distance + 1
+        kernel = cv2.getGaussianKernel(kernel_size, feathering_distance)
+
+        # Convert the mask tensor to a numpy array
+        mask_np = mask.numpy()
+
+        # Apply Gaussian blur to the mask
+        kernel_2d = np.dot(kernel, kernel.T)
+        mask_feathered_np = cv2.filter2D(
+            mask_np, -1, kernel_2d, borderType=cv2.BORDER_CONSTANT)
+
+        # Convert the result back to a PyTorch tensor
+        mask_feathered = torch.tensor(mask_feathered_np, dtype=torch.float32)
+    return mask_feathered
+
+
+def apply_gradient(mask, transition_points, feathering_distance):
+    # Ensure feathering_distance is at least 1
+    gradient = torch.linspace(0, 1, max(feathering_distance, 1))
+    for x, y in transition_points:
+        if x + feathering_distance < mask.shape[0]:
+            mask[x: x + feathering_distance, y] = gradient
+        if x - feathering_distance >= 0:
+            mask[x - feathering_distance: x, y] = gradient[::-1]
+    return mask
+
+
+class ImageAspectPadNode:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        global aspect_ratios  # Assuming aspect_ratios is a list of aspect ratio strings
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "aspect_ratio": (aspect_ratios, {"default": aspect_ratios[0]}),
+                "invert_ratio": (["true", "false"], {"default": "false"}),
+                "edge_feathering_distance": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "feathering": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "exclude_out_of_bounds": (["true", "false"], {"default": "false"}),
+                "left_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "right_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "top_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "bottom_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+            },
+            "optional": {
+                "show_on_node": ("INT", {"default": 0}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    FUNCTION = "expand_image"
+    OUTPUT_NODE = True
+
+    CATEGORY = "LexTools/ImageProcessing/AspectPad"
+
+    def expand_image(self, image, aspect_ratio, invert_ratio, feathering, left_padding, right_padding, top_padding, bottom_padding, show_on_node, exclude_out_of_bounds, edge_feathering_distance):
+        debug_info = {}  # Initialize debug info dictionary
+        debug = True
+        try:
+            # Initial setup
+            d1, d2, d3, d4 = image.size()
+            aspect_ratio = float(aspect_ratio.split(
+                '/')[0]) / float(aspect_ratio.split('/')[1])
+            if invert_ratio == "true":
+                aspect_ratio = 1.0 / aspect_ratio
+
+            # Padding calculations
+            image_aspect_ratio = d3 / d2
+            if image_aspect_ratio > aspect_ratio:
+                pad_height = int(d3 / aspect_ratio) - d2
+                top_padding += pad_height // 2
+                bottom_padding += pad_height - top_padding
+            else:
+                pad_width = int(d2 * aspect_ratio) - d3
+                left_padding += pad_width // 2
+                right_padding += pad_width - left_padding
+
+            # Debug Information
+            debug_info['image_size'] = (d1, d2, d3, d4)
+            debug_info['padding'] = (
+                top_padding, bottom_padding, left_padding, right_padding)
+
+            # Identify the mask boundary
+            boundary_top = top_padding
+            boundary_bottom = top_padding + d2
+            boundary_left = left_padding
+            boundary_right = left_padding + d3
+
+            # Initialize new image and mask
+            new_image = torch.zeros((d1, d2 + top_padding + bottom_padding,
+                                    d3 + left_padding + right_padding, d4), dtype=torch.float32)
+            new_image[:, top_padding:top_padding + d2,
+                      left_padding:left_padding + d3, :] = image
+            mask = torch.ones((d2 + top_padding + bottom_padding,
+                              d3 + left_padding + right_padding), dtype=torch.float32)
+            mask[top_padding:top_padding + d2,
+                 left_padding:left_padding + d3] = 0
+            if debug == True:
+                scale_and_print_mask(mask)
+
+            # Apply edge feathering to the identified boundary within mask
+            transition_points = []
+            for i in range(1, mask.shape[0]):
+                for j in range(mask.shape[1]):
+                    if mask[i, j] != mask[i-1, j]:
+                        transition_points.append((i, j))
+            for i in range(mask.shape[0]):
+                for j in range(1, mask.shape[1]):
+                    if mask[i, j] != mask[i, j-1]:
+                        transition_points.append((i, j))
+            if debug == True:
+                print("Transition Points:", transition_points)  # Debug line
+
+            # Check if "exclude_out_of_bounds" is set to "true"
+            if exclude_out_of_bounds == "true":
+                # Create a mask that excludes the areas touching the bounds
+                inner_mask = torch.zeros_like(mask)
+                inner_mask[boundary_top:boundary_bottom, boundary_left:boundary_right] = 1
+                inner_mask = 1 - inner_mask  # Invert the inner mask
+                
+                # Apply the inner mask to the original mask
+                mask = mask * inner_mask  
+
+                # Filter transition points to only include those within the bounds
+                transition_points = [point for point in transition_points if boundary_top <= point[0] < boundary_bottom and boundary_left <= point[1] < boundary_right]
+
+            # Apply edge feathering to the identified boundary within the new mask
+            if edge_feathering_distance > 0:
+                try:
+                    mask = apply_gradient(mask, transition_points, edge_feathering_distance)
+                except Exception as e:
+                    if debug == True:
+                        print("An error occurred:", str(e))
+            # Apply edge feathering to the identified boundary within mask
+            if debug == True:
+                print("Mask After  Before Feather:")  # Debug line
+                # Assuming this function prints the mask
+                scale_and_print_mask(mask)
+
+            # Apply overall feathering
+            if feathering > 0:
+                try:
+                    mask = apply_feathering(mask, feathering)
+                except Exception as e:
+                    # scale_and_print_mask(mask)
+                    if debug == True:
+                        print("An error occurred:", str(e))
+            if debug == True:
+                print("Mask After  Feather:")  # Debug line
+
+                # Assuming this function prints the mask
+                scale_and_print_mask(mask)
+
+            # Debugging output
+                print("Debug Information:", debug_info)
+
+            output_ui = {}
+            if show_on_node == 1:
+                output_ui = {"ui": {"images": [new_image]}}
+
+            return (new_image, mask, output_ui)
+
+        except Exception as e:
+
+            print("An error occurred:", str(e))
+            if debug == True:
+                print("Debug Information:", debug_info)
+            raise  # Re-raise the caught exception for further handling
 
 
 class ImageRankingNode:
@@ -103,117 +314,63 @@ class ImageRankingNode:
             json.dump(data, f)
 
 
-class ImageAspectPadNode:
-
+class AutoModelForCausalLMNode:
     @classmethod
     def INPUT_TYPES(s):
-        global aspect_ratios  # Assuming aspect_ratios is a list of aspect ratio strings
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "aspect_ratio": (aspect_ratios, {"default": aspect_ratios[0]}),
-                "invert_ratio": (["true", "false"], {"default": "false"}),
-                "feathering": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
-                "left_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
-                "right_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
-                "top_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
-                "bottom_padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
-            
+        return {"required": {
+            "MESSAGE": ("STRING",),
+            "MaxTokens": ("INTEGER",)
+        }}
 
-            },
-            "optional": {
-                    "show_on_node": ("INT", {"default": 0}),
-            }
-        }
+    RETURN_TYPES = ("STRING")
+    FUNCTION = "caption"
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    FUNCTION = "expand_image"
-    OUTPUT_NODE = True
+    CATEGORY = "LexTools/TextGeneration"
 
-    CATEGORY = "LexTools/ImageProcessing/AspectPad"
+    def __init__(self):
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "mistralai/Mistral-7B-Instruct-v0.1")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "mistralai/Mistral-7B-Instruct-v0.1")
 
-    def expand_image(self, image, aspect_ratio, invert_ratio, feathering, left_padding, right_padding, top_padding, bottom_padding,show_on_node):
-   
-        d1, d2, d3, d4 = image.size()
-        aspect_ratio = float(aspect_ratio.split('/')[0]) / float(aspect_ratio.split('/')[1])
-        if invert_ratio == "true":
-            aspect_ratio = 1.0 / aspect_ratio
+    def caption(self, MESSAGE, MaxTokens):
 
-        image_aspect_ratio = d3 / d2
-        if image_aspect_ratio > aspect_ratio:
-            pad_height = int(d3 / aspect_ratio) - d2
-            top_padding += pad_height // 2
-            bottom_padding += pad_height - top_padding
-        else:
-            pad_width = int(d2 * aspect_ratio) - d3
-            left_padding += pad_width // 2
-            right_padding += pad_width - left_padding
-        new_image = torch.zeros(
-            (d1, d2 + top_padding + bottom_padding, d3 + left_padding + right_padding, d4),
-            dtype=torch.float32,
-        )
-        new_image[:, top_padding:top_padding + d2, left_padding:left_padding + d3, :] = image
+        device = "cuda"  # the device to load the model onto
+        messages = [
+            {"role": "user", "content": MESSAGE},
 
-        mask = torch.ones(
-            (d2 + top_padding + bottom_padding, d3 + left_padding + right_padding),
-            dtype=torch.float32,
-        )
+        ]
+        encodeds = self.tokenizer.apply_chat_template(
+            messages, return_tensors="pt")
 
-        t = torch.zeros(
-            (d2, d3),
-            dtype=torch.float32
-        )
+        model_inputs = encodeds.to(device)
+        self.model.to(device)
 
-        if feathering > 0 and feathering * 2 < d2 and feathering * 2 < d3:
+        generated_ids = self.model.generate(
+            model_inputs, max_new_tokens=MaxTokens, do_sample=True)
+        decoded = self.tokenizer.batch_decode(generated_ids)
 
-            for i in range(d2):
-                for j in range(d3):
-                    dt = i if top_padding != 0 else d2
-                    db = d2 - i if bottom_padding != 0 else d2
-
-                    dl = j if left_padding != 0 else d3
-                    dr = d3 - j if right_padding != 0 else d3
-
-                    d = min(dt, db, dl, dr)
-
-                    if d >= feathering:
-                        continue
-
-                    v = (feathering - d) / feathering
-
-                    t[i, j] = v * v
-
-        mask[top_padding:top_padding + d2, left_padding:left_padding + d3] = t
-   
-            
-        output_ui = {}
-        if show_on_node ==1:
-            output_ui = {"ui": {"images": [new_image]}}
-
-
-
-        return  (new_image, mask, output_ui)
-
-    
+        return (decoded[0])
 
 
 class ImageScaleToMin:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"image": ("IMAGE",)},
-                "optional":{"MinScalePix": ("FLOAT", {"default": 512, "min": 0.0, "max": 2056, "step": 1}),}}
+                "optional": {"MinScalePix": ("FLOAT", {"default": 512, "min": 0.0, "max": 2056, "step": 1}), }}
 
     RETURN_TYPES = ("FLOAT",)
     FUNCTION = "calculate_scale"
 
     CATEGORY = "LexTools/ImageProcessing/upscaling"
 
-    def calculate_scale(self, image,MinScalePix):
+    def calculate_scale(self, image, MinScalePix):
         d1, height, width, d4 = image.shape
         min_dim = min(width, height)
         scale = MinScalePix / min_dim
         return (scale,)
-    
+
+
 class ImageFilterByIntScoreNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -234,8 +391,9 @@ class ImageFilterByIntScoreNode:
         if score < threshold:
             pass
         else:
-            return (image,) 
-    
+            return (image,)
+
+
 class ImageFilterByFloatScoreNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -256,7 +414,8 @@ class ImageFilterByFloatScoreNode:
         if score < threshold:
             pass
         else:
-            return (image,) 
+            return (image,)
+
 
 class ImageQualityScoreNode:
     @classmethod
@@ -285,16 +444,17 @@ class ImageQualityScoreNode:
     FUNCTION = "calculate_score"
     CATEGORY = "LexTools/ImageProcessing/Scores"
 
-    def calculate_score(self, image_score_good, image_score_bad, aesthetic_score, ai_score_artificial, ai_score_human,weight_good_score,weight_aesthetic_score,weight_bad_score,weight_AIDetection,MultiplyScoreBy,show_on_node,weight_HumanDetection):
+    def calculate_score(self, image_score_good, image_score_bad, aesthetic_score, ai_score_artificial, ai_score_human, weight_good_score, weight_aesthetic_score, weight_bad_score, weight_AIDetection, MultiplyScoreBy, show_on_node, weight_HumanDetection):
         # Define the weights and maximum possible values
         maxA, maxB, maxC = 3, 3, 1000
         # Compute the exponential effect of the AI score
         ai_score_artificial_exp = 10 ** ai_score_artificial
         # Compute the final score according to the provided formula
-        final_score = ((((((image_score_good + maxA) / (2 * maxA) * weight_good_score) + (aesthetic_score / maxC) * weight_bad_score) / (weight_good_score + weight_bad_score)) - weight_aesthetic_score * ((image_score_bad + maxB) / (2 * maxB))) * ((weight_HumanDetection * (ai_score_human))-( weight_AIDetection* (ai_score_artificial_exp)))) * MultiplyScoreBy
+        final_score = ((((((image_score_good + maxA) / (2 * maxA) * weight_good_score) + (aesthetic_score / maxC) * weight_bad_score) / (weight_good_score + weight_bad_score)) -
+                       weight_aesthetic_score * ((image_score_bad + maxB) / (2 * maxB))) * ((weight_HumanDetection * (ai_score_human))-(weight_AIDetection * (ai_score_artificial_exp)))) * MultiplyScoreBy
 
         # Prepare the output UI
-        return  (final_score, {"ui": {"STRING": [final_score]}})
+        return (final_score, {"ui": {"STRING": [final_score]}})
 
 
 #
@@ -308,59 +468,155 @@ class MLP(pl.LightningModule):
         self.ycol = ycol
         self.layers = nn.Sequential(
             nn.Linear(self.input_size, 1024),
-            #nn.ReLU(),
+            # nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(1024, 128),
-            #nn.ReLU(),
+            # nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(128, 64),
-            #nn.ReLU(),
+            # nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 16),
-            #nn.ReLU(),
+            # nn.ReLU(),
             nn.Linear(16, 1)
         )
+
     def forward(self, x):
         return self.layers(x)
+
     def training_step(self, batch, batch_idx):
-            x = batch[self.xcol]
-            y = batch[self.ycol].reshape(-1, 1)
-            x_hat = self.layers(x)
-            loss = F.mse_loss(x_hat, y)
-            return loss
+        x = batch[self.xcol]
+        y = batch[self.ycol].reshape(-1, 1)
+        x_hat = self.layers(x)
+        loss = F.mse_loss(x_hat, y)
+        return loss
+
     def validation_step(self, batch, batch_idx):
         x = batch[self.xcol]
         y = batch[self.ycol].reshape(-1, 1)
-        x_hat =fastapiself.layers(x)
+        x_hat = fastapiself.layers(x)
         loss = fastapi.mse_loss(x_hat, y)
         return loss
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
-def normalized(a, axis=-1, order=2):
-    import numpy as np  # pylint: disable=import-outside-toplevel
-    l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
-    l2[l2 == 0] = 1
-    return a / np.expand_dims(l2, axis)
+
+    def normalized(a, axis=-1, order=2):
+        import numpy as np  # pylint: disable=import-outside-toplevel
+        l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
+        l2[l2 == 0] = 1
+        return a / np.expand_dims(l2, axis)
+
 
 class AesteticModel:
-  def __init__(self):
-    pass
-  @classmethod
-  def INPUT_TYPES(s):
-    return { "required": {"model_name": (folder_paths.get_filename_list("aesthetic"), )}}
-  RETURN_TYPES = ("AESTHETIC_MODEL",)
-  FUNCTION = "load_model"
-  CATEGORY = "LexTools/ImageProcessing/aestheticscore"
-  def load_model(self, model_name):
-    #load model
-    m_path = folder_paths.folder_names_and_paths["aesthetic"][0]
-    m_path2 = os.path.join(m_path[0],model_name)
-    return (m_path2,)
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"model_name": (folder_paths.get_filename_list("aesthetic"), )}}
+    RETURN_TYPES = ("AESTHETIC_MODEL",)
+    FUNCTION = "load_model"
+    CATEGORY = "LexTools/ImageProcessing/aestheticscore"
+
+    def load_model(self, model_name):
+        # load model
+        m_path = folder_paths.folder_names_and_paths["aesthetic"][0]
+        m_path2 = os.path.join(m_path[0], model_name)
+        return (m_path2,)
+
+
+class SaturationMatchingNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "working_image": ("IMAGE",),
+                "master_image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "LexTools/ImageProcessing/SaturationMatching"
+
+    def __init__(self):
+        self.working_image = None
+        self.master_image = None
+
+    def calculate_saturation(self, tensor_image):
+
+        if len(tensor_image.shape) == 4:
+            # Take the first image from the batch
+            tensor_image = tensor_image[0]
+
+        # Convert tensor to numpy array and then to PIL Image
+        img = (tensor_image * 255).to(torch.uint8).numpy()
+        pil_image = Image.fromarray(img, mode='RGB')
+
+        # Convert to HSV
+        hsv_image = pil_image.convert('HSV')
+        s_channel = np.array(hsv_image)[:, :, 1]
+
+        # Calculate average saturation
+        avg_saturation = np.mean(s_channel)
+        return avg_saturation
+
+    def adjust_saturation(self, tensor_image, target_saturation):
+
+        original_shape = tensor_image.shape
+        if len(tensor_image.shape) == 4:
+            # Take the first image from the batch
+            tensor_image = tensor_image[0]
+
+        # Convert tensor to numpy array and then to PIL Image
+        img = (tensor_image * 255).to(torch.uint8).cpu().numpy()
+        img = np.transpose(img, (1, 2, 0))
+        pil_image = Image.fromarray(img, mode='RGB')
+
+        # Convert to HSV
+        hsv_image = pil_image.convert('HSV')
+        hsv_array = np.array(hsv_image)
+
+        # Calculate current average saturation
+        current_saturation = np.mean(hsv_array[:, :, 1])
+
+        # Calculate adjustment factor
+        factor = target_saturation / current_saturation
+
+        # Adjust saturation
+        hsv_array[:, :, 1] = np.clip(
+            hsv_array[:, :, 1] * factor, 0, 255).astype(np.uint8)
+
+        # Convert back to PIL Image and then to tensor
+        adjusted_hsv_image = Image.fromarray(hsv_array, 'HSV')
+        adjusted_rgb_image = adjusted_hsv_image.convert('RGB')
+        tensor_transform = transforms.ToTensor()
+        adjusted_tensor = tensor_transform(adjusted_rgb_image)
+
+        # Reshape to match the original tensor shape
+        if len(original_shape) == 4:
+            adjusted_tensor = adjusted_tensor.unsqueeze(0)
+
+        return adjusted_tensor
+
+    def run(self, working_image, master_image):
+        self.working_image = working_image
+        self.master_image = master_image
+
+        # Calculate target saturation from master image
+        target_saturation = self.calculate_saturation(self.master_image)
+
+        # Adjust the saturation of the working image
+        adjusted_image = self.adjust_saturation(
+            self.working_image, target_saturation)
+
+        return adjusted_image
 
 
 class CalculateAestheticScore:
-    device = "cuda" 
+    device = "cuda"
     model2 = None
     preprocess = None
     model = None
@@ -386,16 +642,18 @@ class CalculateAestheticScore:
 
     def execute(self, image, aesthetic_model, keep_in_memory):
         if not self.model2 or not self.preprocess:
-            self.model2, self.preprocess = clip.load("ViT-L/14", device=self.device)  #RN50x64 
+            self.model2, self.preprocess = clip.load(
+                "ViT-L/14", device=self.device)  # RN50x64
 
         m_path2 = aesthetic_model
 
         if not self.model:
-            self.model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
+            # CLIP embedding dim is 768 for CLIP ViT L 14
+            self.model = MLP(768)
             s = torch.load(m_path2)
             self.model.load_state_dict(s)
             self.model.to(self.device)
-        
+
         self.model.eval()
 
         tensor_image = image[0]
@@ -410,7 +668,8 @@ class CalculateAestheticScore:
             image_features = self.model2.encode_image(image2)
 
         im_emb_arr = normalized(image_features.cpu().detach().numpy())
-        prediction = self.model(torch.from_numpy(im_emb_arr).to(self.device).type(torch.cuda.FloatTensor))
+        prediction = self.model(torch.from_numpy(im_emb_arr).to(
+            self.device).type(torch.cuda.FloatTensor))
         final_prediction = int(float(prediction[0])*100)
 
         if not keep_in_memory:
@@ -419,10 +678,11 @@ class CalculateAestheticScore:
             self.preprocess = None
 
         return (final_prediction,)
-    
+
+
 class MD5ImageHashNode:
     device = "cuda"
-    
+
     def __init__(self):
         pass
 
@@ -440,7 +700,7 @@ class MD5ImageHashNode:
 
     def execute(self, image):
         tensor_image = image[0]
-        
+
         # Convert the tensor to a PIL image
         img = (tensor_image * 255).to(torch.uint8).cpu().numpy()
         pil_image = Image.fromarray(img, mode='RGB')
@@ -457,29 +717,33 @@ class MD5ImageHashNode:
 
         return (md5_hash,)
 
+
 class AesthetlcScoreSorter:
-  def __init__(self):
+    def __init__(self):
+        pass
     pass
-  pass
-  @classmethod
-  def INPUT_TYPES(s):
+
+    @classmethod
+    def INPUT_TYPES(s):
         return {
-          "required":{
-            "image": ("IMAGE",),
-            "score": ("SCORE",),
-            "image2": ("IMAGE",),
-            "score2": ("SCORE",),
-          }
+            "required": {
+                "image": ("IMAGE",),
+                "score": ("SCORE",),
+                "image2": ("IMAGE",),
+                "score2": ("SCORE",),
+            }
         }
-  RETURN_TYPES = ("IMAGE", "SCORE", "IMAGE", "SCORE",)
-  FUNCTION = "execute"
-  CATEGORY = "LexTools/ImageProcessing/aestheticscore"
-  def execute(self,image,score,image2,score2):
-    if score >= score2:
-      return (image, score, image2, score2,)
-    else: 
-      return (image2, score2, image, score,)
-    
+    RETURN_TYPES = ("IMAGE", "SCORE", "IMAGE", "SCORE",)
+    FUNCTION = "execute"
+    CATEGORY = "LexTools/ImageProcessing/aestheticscore"
+
+    def execute(self, image, score, image2, score2):
+        if score >= score2:
+            return (image, score, image2, score2,)
+        else:
+            return (image2, score2, image, score,)
+
+
 class ScoreConverterNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -505,34 +769,36 @@ class ScoreConverterNode:
 
         # Prepare the output UI
         output_ui = {}
-        if show_on_node ==1:
-           output_ui = {"ui": {"STRING": [score_str]}}
+        if show_on_node == 1:
+            output_ui = {"ui": {"STRING": [score_str]}}
 
-        return  (score_int, score_float, score_str, output_ui)
+        return (score_int, score_float, score_str, output_ui)
+
 
 class SamplerPropertiesNode:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required":{
-                    "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
-                    "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                    "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step":0.5, "round": 0.01}),
-                    "denoise": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1, "step":0.1, "round": 0.01}),
-                    "sampler_name": (comfy.samplers.KSampler.SAMPLERS, ),
-                    "scheduler": (comfy.samplers.KSampler.SCHEDULERS, ),
-          
-                     }
-                }
+        return {"required": {
+            "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),
+            "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.5, "round": 0.01}),
+            "denoise": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1, "step": 0.1, "round": 0.01}),
+            "sampler_name": (comfy.samplers.KSampler.SAMPLERS, ),
+            "scheduler": (comfy.samplers.KSampler.SCHEDULERS, ),
 
-    RETURN_TYPES = ("STRING","INT","FLOAT","FLOAT","STRING","STRING")
+        }
+        }
+
+    RETURN_TYPES = ("STRING", "INT", "FLOAT", "FLOAT", "STRING", "STRING")
     FUNCTION = "sample"
 
     CATEGORY = "sampling"
 
-    def sample(self, ckpt_name,  steps, cfg, sampler_name, scheduler,denoise):
+    def sample(self, ckpt_name,  steps, cfg, sampler_name, scheduler, denoise):
         pass
-        return (ckpt_name, steps, cfg, sampler_name, scheduler,denoise)
-    
+        return (ckpt_name, steps, cfg, sampler_name, scheduler, denoise)
+
+
 NODE_CLASS_MAPPINGS = {
 
     "ImageFilterByIntScoreNode": ImageFilterByIntScoreNode,
@@ -541,10 +807,11 @@ NODE_CLASS_MAPPINGS = {
     "ImageAspectPadNode": ImageAspectPadNode,
     "ImageRankingNode": ImageRankingNode,
     "ImageQualityScoreNode": ImageQualityScoreNode,
-    "ScoreConverterNode":ScoreConverterNode,
+    "ScoreConverterNode": ScoreConverterNode,
     "MD5ImageHashNode": MD5ImageHashNode,
     "SamplerPropertiesNode": SamplerPropertiesNode,
 
+    "SaturationMatchingNode": SaturationMatchingNode
 }
 
 
@@ -553,7 +820,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageFilterByFloatScoreNode": "Image Filter (Float Score)",
     "ImageScaleToMin": "Image Scale To Min",
     "ImageRankingNode": "Image Ranking For Image Reward",
-    "ScoreConverterNode":"Score Converter (Aesthetic Score)",
-    "MD5ImageHashNode":"MD5 Image Hash",
-    "SamplerPropertiesNode":"Sampler input node",
-    }
+    "ScoreConverterNode": "Score Converter (Aesthetic Score)",
+    "MD5ImageHashNode": "MD5 Image Hash",
+    "SamplerPropertiesNode": "Property Output Node.",
+    "SaturationMatchingNode": "SaturationMatchingNode",
+
+}
