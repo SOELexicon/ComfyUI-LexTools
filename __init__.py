@@ -1,5 +1,6 @@
 #from .nodes.SegGPT import segGPTNode
 from .nodes import SegformerNode,ImageCaptioningNode,ImageProcessingNode
+
 NODE_CLASS_MAPPINGS = {
 
     **SegformerNode.NODE_CLASS_MAPPINGS,
