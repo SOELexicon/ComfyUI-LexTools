@@ -127,7 +127,7 @@ class ArtOrHumanClassifierNode:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "show_on_node": ("BOOL", {"default": False}),
+                "show_on_node": ("BOOLEAN", {"default": False}),
             },
         }
     OUTPUT_NODE = True
