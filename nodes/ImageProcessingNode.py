@@ -544,7 +544,9 @@ NODE_CLASS_MAPPINGS = {
     "ScoreConverterNode":ScoreConverterNode,
     "MD5ImageHashNode": MD5ImageHashNode,
     "SamplerPropertiesNode": SamplerPropertiesNode,
-
+    "CalculateAestheticScore": CalculateAestheticScore,
+    "LoadAesteticModel":AesteticModel,
+    "AesthetlcScoreSorter": AesthetlcScoreSorter,
 }
 
 
@@ -556,4 +558,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ScoreConverterNode":"Score Converter (Aesthetic Score)",
     "MD5ImageHashNode":"MD5 Image Hash",
     "SamplerPropertiesNode":"Sampler input node",
+    "LoadAesteticModel": "LoadAesteticModel",
+    "CalculateAestheticScore": "CalculateAestheticScore",
+    "AesthetlcScoreSorter": "AesthetlcScoreSorter",
     }
