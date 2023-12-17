@@ -376,7 +376,7 @@ class CalculateAestheticScore:
                 "aesthetic_model": ("AESTHETIC_MODEL",),
             },
             "optional": {
-                "keep_in_memory": ("BOOL", {"default": True}),
+                "keep_in_memory": ("BOOLEAN", {"default": True}),
             }
         }
 
