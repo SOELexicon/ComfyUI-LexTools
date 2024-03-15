@@ -1,6 +1,5 @@
 import hashlib
-import fastapi
-import fastapi
+from fastapi import FastApi
 import torch, time
 import io
 
