@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-lextools"
+description = "ComfyUI-LexTools is a Python-based image processing and analysis toolkit that uses machine learning models for semantic image segmentation, image scoring, and image captioning."
+version = "1.0.0"
+license = "LICENSE"
+dependencies = ["numpy", "opencv-python", "git+https://github.com/facebookresearch/detectron2.git", "pyodbc"]
+
+[project.urls]
+Repository = "https://github.com/SOELexicon/ComfyUI-LexTools"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ComfyUI-LexTools"
+Icon = ""
