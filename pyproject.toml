@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-lextools"
 description = "ComfyUI-LexTools is a Python-based image processing and analysis toolkit that uses machine learning models for semantic image segmentation, image scoring, and image captioning."
-version = "1.0.0"
+version = "1.0.1"
 license = "LICENSE"
 dependencies = ["numpy", "opencv-python", "git+https://github.com/facebookresearch/detectron2.git", "pyodbc"]
 
