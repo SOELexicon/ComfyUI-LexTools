@@ -25,65 +25,92 @@ ComfyUI-LexTools is a Python-based image processing and analysis toolkit that us
       - _Output_: Converted score.
 
    Additional nodes from [GitHub Pages](https://github.com/strimmlarn/ComfyUI-Strimmlarns-Aesthetic-Score/) - These have been modified to improve performance and add an option to store the model in RAM, which significantly reduces generation time:
-   - `CalculateAestheticScore`: An optimized version of the original, with an option to keep the model loaded in RAM. (No specific input or output detailed in the provided code)
-   - `AesthetlcScoreSorter`: Sorts the images by score. (No specific input or output detailed in the provided code)
-   - `AesteticModel`: Loads the aesthetic model. (No specific input or output detailed in the provided code)
+   - `CalculateAestheticScore`: An optimized version of the original, with an option to keep the model loaded in RAM.
+   - `AesthetlcScoreSorter`: Sorts the images by score.
+   - `AesteticModel`: Loads the aesthetic model.
 
 2. **ImageCaptioningNode.py** - Implements nodes for image captioning and classification:
-   - `ImageCaptioningNode`: Provides a caption for the image.
+   - `ImageCaptioningNode`: Provides a caption for the image using BLIP model.
       - _Input_: `image` (IMAGE)
       - _Output_: String caption.
-   - `FoodCategoryNode`: Classifies the food category of an image.
+   - `FoodCategoryClassifierNode`: Classifies food categories in images.
       - _Input_: `image` (IMAGE)
-      - _Output_: String category.
-   - `AgeClassifierNode`: Classifies the age of a person in the image.
+      - _Output_: Top 5 food categories with probabilities.
+   - `AgeClassifierNode`: Classifies the age range in images.
       - _Input_: `image` (IMAGE)
-      - _Output_: String age range.
-   - `ImageClassifierNode`: General image classification.
+      - _Output_: Top 5 age ranges with probabilities.
+   - `ArtOrHumanClassifierNode`: Detects if an image is AI-generated or human-made.
       - _Input_: `image` (IMAGE), `show_on_node` (BOOL)
-      - _Output_: String label, `artificial_prob` (INT), `human_prob` (INT)
-   - `ClassifierNode`: A generic classifier node.
+      - _Output_: Artificial and human probabilities.
+   - `DocumentClassificationNode`: Classifies document types.
       - _Input_: `image` (IMAGE)
-      - _Output_: String label.
+      - _Output_: Document type index and name.
+   - `NSFWClassifierNode`: Classifies content safety levels.
+      - _Input_: `image` (IMAGE), `show_on_node` (BOOL)
+      - _Output_: 
+         - Classification report (STRING)
+         - NSFW Score (FLOAT)
+         - Neutral Score (FLOAT)
+         - Sexy Score (FLOAT)
+         - Porn Score (FLOAT)
 
-3. **SegformerNode.py** - Handles semantic segmentation of images. It includes various nodes such as:
-   - `SegformerNode`: Performs segmentation of the image.
-      - _Input_: `image` (IMAGE), `model_name` (STRING), `show_on_node` (BOOL)
-      - _Output_: Segmented image.
-   - `SegformerNodeMasks`: Provides masks for the segmented images.
-      - _Input_: No specific input detailed in the provided code.
-      - _Output_: Image masks.
-   - `SegformerNodeMergeSegments`: Merges certain segments in the segmented image.
-      - _Input_: `image` (IMAGE), `segments_to_merge` (STRING), `model_name` (STRING), `blur_radius` (INT), `dilation_radius` (INT), `intensity` (INT), `ceiling` (INT), `show_on_node` (BOOL)
-      - _Output_: Image with merged segments.
-   - `SeedIncrementerNode`: Increment the seed used for random processes.
-      - _Input_: `seed` (INT), `increment_at` (INT)
-      - _Output_: Incremented seed.
-   - `StepCfgIncrementNode`: Calculates the step configuration for the process.
-      - _Input_: `seed` (INT), `cfg_start` (INT), `steps_start` (INT), `img_steps` (INT), `max_steps` (INT)
-      - _Output_: Calculated step configuration.
+3. **SegformerNode.py** - Handles semantic segmentation of images:
+   - `SegformerNode`: Performs semantic segmentation with multiple model options.
+      - _Input_: `image` (IMAGE), `model_name` (STRING), `normalize_mask` (BOOL), `binary_mask` (BOOL), `resize_mode` (STRING), `invert_mask` (BOOL), `show_preview` (BOOL), `return_individual_masks` (BOOL), `post_process` (STRING), `post_process_radius` (INT), `segment_groups` (STRING)
+      - _Output_: Segmented image, mask, info, and preview.
+   - `SegformerNodeMasks`: Creates individual segment masks.
+      - _Input_: `image` (IMAGE), `segments_to_merge` (STRING), `model_name` (STRING)
+      - _Output_: Image, mask, and segment info.
+   - `SegformerNodeMergeSegments`: Merges and processes segments with advanced options.
+      - _Input_: `image` (IMAGE), `segments_to_merge_str` (STRING), `model_name` (STRING), `normalize_mask` (BOOL), `binary_mask` (BOOL), `resize_mode` (STRING), `invert_mask` (BOOL), `show_preview` (BOOL), `blur_radius` (INT), `dilation_radius` (INT), `intensity` (FLOAT), `ceiling` (FLOAT)
+      - _Output_: Processed image, mask, info, and preview.
+   - `SeedIncrementerNode`: Manages seed incrementation for workflows.
+      - _Input_: `seed` (INT), `IncrementAt` (INT)
+      - _Output_: Seed string, seed int, subseed string, subseed int.
+   - `StepCfgIncrementNode`: Handles step and configuration increments.
+      - _Input_: `seed` (INT), `cfg_start` (INT), `steps_start` (INT), `image_steps` (INT), `max_steps` (INT)
+      - _Output_: CFG and steps values.
 
 ## Requirements
 
-The project primarily uses the following libraries:
+The project requires the following Python libraries:
 
-- Python
-- Torch
-- Transformers
-- PIL
-- Matplotlib
-- Numpy
-- IO
-- Scipy
+- torch
+- transformers
+- Pillow (PIL)
+- matplotlib
+- numpy
+- scipy
+- huggingface_hub
 
 ## Installation
 
-To install the necessary libraries, run:
-
+1. Install the required Python packages:
 ```bash
-pip install torch transformers pillow matplotlib numpy scipy
+pip install torch transformers pillow matplotlib numpy scipy huggingface_hub
 ```
 
+2. Clone this repository into your ComfyUI custom_nodes directory:
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/YourUsername/ComfyUI-LexTools.git
+```
+
+3. Restart ComfyUI to load the new nodes.
+
+## Usage
+
+The nodes will appear in the ComfyUI interface under the "LexTools" category, organized into subcategories:
+- LexTools/ImageProcessing/Segmentation
+- LexTools/ImageProcessing/Classification
+- LexTools/ImageProcessing/Captioning
+- LexTools/Utilities
+
 ## Contributing
-Contributions to this project are welcome. If you find a bug or think of a feature that would benefit the project, please open an issue. If you'd like to contribute code, please open a pull request.
+
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
 

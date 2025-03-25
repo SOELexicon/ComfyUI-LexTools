@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 from scipy.ndimage import binary_dilation
+import os
+from pathlib import Path
+import json
 
 
 model_names = [
@@ -15,20 +18,74 @@ model_names = [
                 "DiTo97/binarization-segformer-b3",
                 "s3nh/SegFormer-b0-person-segmentation",
                 "venture361/clothes_segmentation", 
+                   "itsitgroup/human-body-segmentation", 
                 "matei-dorian/segformer-b5-finetuned-human-parsing",
                 "Lexic0n/segformer-b0-finetuned-human-parsing",
                 "sam1120/segformer-b0-finetuned-neurosymbolic-contingency-bag1-v0.1-v0",
                 "ehsanhallo/segformer-b0-scene-parse-150"
                 ]
 
+class SegformerModelLoader:
+    _models = {}  # Cache for loaded models
+    _processors = {}  # Cache for loaded processors
+    
+    @classmethod
+    def get_local_checkpoints(cls):
+        """Get list of local checkpoint directories"""
+        checkpoints_dir = Path("models/segformer")
+        if not checkpoints_dir.exists():
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+            return []
+        
+        # Look for config.json files in subdirectories
+        checkpoints = []
+        for path in checkpoints_dir.glob("*/config.json"):
+            checkpoints.append(path.parent.name)
+        return checkpoints
+
+    @classmethod
+    def load_model(cls, model_name, local_dir=None):
+        """Load model and processor with caching"""
+        # Check cache first
+        cache_key = model_name if not local_dir else str(local_dir)
+        if cache_key in cls._models:
+            return cls._models[cache_key], cls._processors[cache_key]
+
+        try:
+            if local_dir:
+                processor = SegformerImageProcessor.from_pretrained(local_dir)
+                model = AutoModelForSemanticSegmentation.from_pretrained(local_dir)
+            else:
+                processor = SegformerImageProcessor.from_pretrained(model_name)
+                model = AutoModelForSemanticSegmentation.from_pretrained(model_name)
+            
+            # Cache the loaded model and processor
+            cls._models[cache_key] = model
+            cls._processors[cache_key] = processor
+            return model, processor
+        except Exception as e:
+            print(f"Error loading model {model_name}: {str(e)}")
+            # Fallback to a reliable model
+            return cls.load_model("matei-dorian/segformer-b5-finetuned-human-parsing")
+
+    @classmethod
+    def clear_cache(cls):
+        """Clear the model cache"""
+        cls._models.clear()
+        cls._processors.clear()
+
+# Update the model_names list to include local checkpoints
+def get_available_models():
+    local_checkpoints = SegformerModelLoader.get_local_checkpoints()
+    return model_names + [f"local:{cp}" for cp in local_checkpoints]
+
 class SegformerNode:
     @classmethod
     def INPUT_TYPES(cls):
-        global model_names
         return {
             "required": {
                 "image": ("IMAGE", {"default": None}),
-                "model_name": (model_names, {"default": model_names[0]}),
+                "model_name": (get_available_models(), {"default": model_names[0]}),
                 "normalize_mask": ("BOOLEAN", {"default": True}),
                 "binary_mask": ("BOOLEAN", {"default": False}),
                 "resize_mode": (["nearest", "bilinear", "bicubic"], {"default": "bilinear"}),
@@ -113,9 +170,14 @@ class SegformerNode:
                      resize_mode="bilinear", invert_mask=False, show_preview=True,
                      return_individual_masks=False, post_process="none", 
                      post_process_radius=3, segment_groups=""):
+        # Handle local checkpoint loading
+        if model_name.startswith("local:"):
+            local_dir = Path("models/segformer") / model_name[6:]
+            self.model, self.processor = SegformerModelLoader.load_model(model_name, local_dir)
+        else:
+            self.model, self.processor = SegformerModelLoader.load_model(model_name)
+
         show_on_node = False
-        self.processor = SegformerImageProcessor.from_pretrained(model_name)
-        self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name)
         
         # Process input image
         i = 255. * image[0].cpu().numpy()
@@ -203,13 +265,11 @@ class SegformerNode:
 class SegformerNodeMasks:
     @classmethod
     def INPUT_TYPES(cls):
-        global model_names  # Assuming model_names is a list of model names
         return {
             "required": {
                 "image": ("IMAGE", {"default": None}),
                 "segments_to_merge": ("STRING", {"default": "0"}),
-                "model_name": (model_names, {"default": model_names[0]})
-              
+                "model_name": (get_available_models(), {"default": model_names[0]}),
             },
         }
 
@@ -222,13 +282,16 @@ class SegformerNodeMasks:
 
     # Function to segment the image and return the merged segments as per the provided indices
     def segment_image(self, image, segments_to_merge, model_name):
+        # Handle local checkpoint loading
+        if model_name.startswith("local:"):
+            local_dir = Path("models/segformer") / model_name[6:]
+            self.model, self.processor = SegformerModelLoader.load_model(model_name, local_dir)
+        else:
+            self.model, self.processor = SegformerModelLoader.load_model(model_name)
+
         # Convert the segments_to_merge from string to list of integers
         show_on_node=False
         segments_to_merge = list(map(int, segments_to_merge.split(',')))
-
-        # Load the pretrained models and processors
-        self.processor = SegformerImageProcessor.from_pretrained(model_name)
-        self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name)
 
         # Preprocess the image
         i = 255. * image[0].cpu().numpy()
@@ -300,12 +363,11 @@ class SegformerNodeMasks:
 class SegformerNodeMergeSegments:
     @classmethod
     def INPUT_TYPES(cls):
-        global model_names  
         return {
             "required": {
                 "image": ("IMAGE", {"default": None}),
                 "segments_to_merge_str": ("STRING", {"default": ""}),
-                "model_name": (model_names, {"default": model_names[0]}),
+                "model_name": (get_available_models(), {"default": model_names[0]}),
                 "normalize_mask": ("BOOLEAN", {"default": True}),
                 "binary_mask": ("BOOLEAN", {"default": False}),
                 "resize_mode": (["nearest", "bilinear", "bicubic"], {"default": "bilinear"}),
@@ -332,6 +394,10 @@ class SegformerNodeMergeSegments:
             mask = torch.from_numpy(mask)
         mask = mask.float()
         
+        # Ensure mask is 2D
+        if len(mask.shape) > 2:
+            mask = mask.squeeze()
+        
         # Normalize to 0-1 range if requested
         if normalize:
             min_val = mask.min()
@@ -355,8 +421,9 @@ class SegformerNodeMergeSegments:
 
         # Apply Gaussian blur for feathering
         if blur_radius > 0:
-            mask_np = (mask.numpy() * 255).astype('uint8')
-            mask_pil = Image.fromarray(mask_np)
+            # Ensure mask is 2D and in correct range for PIL
+            mask_np = (mask.squeeze().numpy() * 255).astype(np.uint8)
+            mask_pil = Image.fromarray(mask_np, mode='L')  # Use 'L' mode for grayscale
             mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=blur_radius))
             mask = torch.from_numpy(np.array(mask_pil).astype(np.float32) / 255.0)
 
@@ -373,6 +440,24 @@ class SegformerNodeMergeSegments:
         # Create an RGBA preview with the mask as alpha channel
         if len(image.shape) == 2:
             image = image.unsqueeze(0).repeat(3, 1, 1)
+        elif len(image.shape) == 3:
+            if image.shape[0] != 3:  # If channels are not in first dimension
+                image = image.permute(2, 0, 1)  # Move channels to first dimension
+        
+        # Ensure mask has correct dimensions
+        if len(mask.shape) == 3:
+            mask = mask.squeeze(0)
+        if len(mask.shape) > 2:
+            mask = mask.squeeze()
+            
+        if mask.shape != image.shape[1:]:
+            mask = torch.nn.functional.interpolate(
+                mask.unsqueeze(0).unsqueeze(0),
+                size=image.shape[1:],
+                mode='bilinear',
+                align_corners=False
+            ).squeeze()
+        
         preview = image.clone()
         preview = torch.cat([preview, mask.unsqueeze(0)], dim=0)
         return preview
@@ -381,76 +466,105 @@ class SegformerNodeMergeSegments:
                       binary_mask=False, resize_mode="bilinear", invert_mask=False, 
                       show_preview=True, blur_radius=5, dilation_radius=5, 
                       intensity=1.0, ceiling=1.0):
-        show_on_node = False
-    
         try:
-            self.processor = SegformerImageProcessor.from_pretrained(model_name)
-        except Exception:
-            print(f"Failed to load preprocessor for model {model_name}. Using preprocessor from mattmdjaga/segformer_b2_clothes instead.")
-            self.processor = SegformerImageProcessor.from_pretrained("matei-dorian/segformer-b5-finetuned-human-parsing")
-        self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name)
+            # Handle local checkpoint loading
+            if model_name.startswith("local:"):
+                local_dir = Path("models/segformer") / model_name[6:]
+                self.model, self.processor = SegformerModelLoader.load_model(model_name, local_dir)
+            else:
+                self.model, self.processor = SegformerModelLoader.load_model(model_name)
+
+            show_on_node = False
             
-        i = 255. * image[0].cpu().numpy()
-        img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-        inputs = self.processor(images=img, return_tensors="pt")
+            # Get input image dimensions and ensure proper shape
+            input_image = image[0].cpu()
+            if len(input_image.shape) != 3:
+                raise ValueError(f"Expected input image with shape (H,W,C) or (C,H,W), got {input_image.shape}")
+            
+            # Ensure image is in HWC format
+            if input_image.shape[0] == 3:  # If in CHW format
+                input_image = input_image.permute(1, 2, 0)
+            
+            input_height, input_width = input_image.shape[0:2]
+            
+            # Process input image
+            img = Image.fromarray((input_image.numpy() * 255).astype(np.uint8))
+            inputs = self.processor(images=img, return_tensors="pt")
 
-        outputs = self.model(**inputs)
-        logits = outputs.logits.cpu()
+            outputs = self.model(**inputs)
+            logits = outputs.logits.cpu()
 
-        upsampled_logits = nn.functional.interpolate(
-            logits,
-            size=img.size[::-1],
-            mode=resize_mode,
-            align_corners=False if resize_mode != "nearest" else None,
-        )
+            # Upsample logits to match input image size
+            upsampled_logits = nn.functional.interpolate(
+                logits,
+                size=(input_height, input_width),
+                mode=resize_mode,
+                align_corners=False if resize_mode != "nearest" else None,
+            )
 
-        pred_seg = upsampled_logits.argmax(dim=1)[0].numpy()
-        unique_segments = np.unique(pred_seg)
+            pred_seg = upsampled_logits.argmax(dim=1)[0].numpy()
+            unique_segments = np.unique(pred_seg)
 
-        # Handle empty segments string
-        if not segments_to_merge_str.strip():
-            segments_to_merge = []
-        else:
-            segments_to_merge = [int(s.strip()) for s in segments_to_merge_str.split(',') if s.strip()]
+            # Handle empty segments string
+            if not segments_to_merge_str.strip():
+                segments_to_merge = []
+            else:
+                segments_to_merge = [int(s.strip()) for s in segments_to_merge_str.split(',') if s.strip()]
 
-        merged_mask = np.zeros_like(pred_seg, dtype=np.float32)
-        merged_segments = []
+            merged_mask = np.zeros((input_height, input_width), dtype=np.float32)
+            merged_segments = []
 
-        for segment in unique_segments:
-            if segment in segments_to_merge:
-                mask = np.where(pred_seg == segment, 1, 0)
-                merged_mask = np.maximum(merged_mask, mask)
-                merged_segments.append(segment)
+            for segment in unique_segments:
+                if segment in segments_to_merge:
+                    mask = np.where(pred_seg == segment, 1, 0)
+                    merged_mask = np.maximum(merged_mask, mask)
+                    merged_segments.append(segment)
 
-        # Convert to tensor and process
-        merged_mask = torch.from_numpy(merged_mask)
-        merged_mask = self.process_mask(
-            merged_mask,
-            normalize=normalize_mask,
-            binary=binary_mask,
-            invert=invert_mask,
-            blur_radius=blur_radius,
-            dilation_radius=dilation_radius,
-            intensity=intensity,
-            ceiling=ceiling
-        )
+            # Convert to tensor and process
+            merged_mask = torch.from_numpy(merged_mask)
+            merged_mask = self.process_mask(
+                merged_mask,
+                normalize=normalize_mask,
+                binary=binary_mask,
+                invert=invert_mask,
+                blur_radius=blur_radius,
+                dilation_radius=dilation_radius,
+                intensity=intensity,
+                ceiling=ceiling
+            )
 
-        # Create preview if requested
-        preview = self.create_preview(image[0], merged_mask) if show_preview else None
+            # Ensure mask has correct dimensions for broadcasting
+            merged_mask_3d = merged_mask.unsqueeze(-1)  # Add channel dimension for broadcasting
 
-        # Apply mask to image
-        merged_image = image[0].cpu().numpy() * merged_mask.numpy()[..., None]
-        merged_image = torch.from_numpy(merged_image).unsqueeze(0)
+            # Apply mask to image
+            merged_image = input_image.numpy() * merged_mask_3d.numpy()
+            
+            # Convert back to tensor in CHW format
+            merged_image = torch.from_numpy(merged_image).permute(2, 0, 1).unsqueeze(0)
 
-        merged_segments_str = ','.join(map(str, merged_segments))
-        if not merged_segments:
-            merged_segments_str = "No segments selected"
+            merged_segments_str = ','.join(map(str, merged_segments))
+            if not merged_segments:
+                merged_segments_str = "No segments selected"
 
-        output_ui = {"images": [merged_image]} if show_on_node else {}
+            # Create preview
+            if show_preview:
+                preview = self.create_preview(input_image.permute(2, 0, 1), merged_mask)
+            else:
+                preview = merged_image
 
-        return {"result": (merged_image, merged_mask, merged_segments_str, 
-                preview if preview is not None else merged_image), 
-                "ui": output_ui}
+            output_ui = {"images": [merged_image]} if show_on_node else {}
+
+            return {"result": (merged_image, merged_mask, merged_segments_str, preview), 
+                    "ui": output_ui}
+
+        except Exception as e:
+            import traceback
+            print(f"Error merging segments: {str(e)}")
+            print(f"Traceback: {traceback.format_exc()}")
+            # Return original image and empty mask on error
+            empty_mask = torch.zeros((input_height, input_width), dtype=torch.float32)
+            return {"result": (image, empty_mask, f"Error: {str(e)}", image), 
+                    "ui": {"images": [image]} if show_on_node else {}}
 
     
     
