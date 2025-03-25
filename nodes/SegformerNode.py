@@ -306,6 +306,11 @@ class SegformerNodeMergeSegments:
                 "image": ("IMAGE", {"default": None}),
                 "segments_to_merge_str": ("STRING", {"default": ""}),
                 "model_name": (model_names, {"default": model_names[0]}),
+                "normalize_mask": ("BOOLEAN", {"default": True}),
+                "binary_mask": ("BOOLEAN", {"default": False}),
+                "resize_mode": (["nearest", "bilinear", "bicubic"], {"default": "bilinear"}),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+                "show_preview": ("BOOLEAN", {"default": True}),
                 "blur_radius": ("INT", {"default": 5, "min": 0, "max": 100}),
                 "dilation_radius": ("INT", {"default": 5, "min": 0, "max": 100}),
                 "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
@@ -314,16 +319,69 @@ class SegformerNodeMergeSegments:
         }
 
     OUTPUT_NODE = True
-
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "IMAGE")  # Added IMAGE for preview
     FUNCTION = "merge_segments"
     CATEGORY = "LexTools/ImageProcessing/Segmentation"
 
     def __init__(self):
         pass
 
-    def merge_segments(self, image, segments_to_merge_str, model_name, blur_radius, dilation_radius, intensity, ceiling):
-        show_on_node=False
+    def process_mask(self, mask, normalize=True, binary=False, invert=False, blur_radius=0, dilation_radius=0, intensity=1.0, ceiling=1.0):
+        # Convert to float32 if not already
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask)
+        mask = mask.float()
+        
+        # Normalize to 0-1 range if requested
+        if normalize:
+            min_val = mask.min()
+            max_val = mask.max()
+            if max_val > min_val:
+                mask = (mask - min_val) / (max_val - min_val)
+        
+        # Convert to binary if requested
+        if binary:
+            mask = (mask > 0.5).float()
+        
+        # Apply dilation if specified
+        if dilation_radius > 0:
+            kernel = torch.ones(2 * dilation_radius + 1, 2 * dilation_radius + 1)
+            mask = torch.nn.functional.conv2d(
+                mask.unsqueeze(0).unsqueeze(0),
+                kernel.unsqueeze(0).unsqueeze(0),
+                padding=dilation_radius
+            ).squeeze() > 0
+            mask = mask.float()
+
+        # Apply Gaussian blur for feathering
+        if blur_radius > 0:
+            mask_np = (mask.numpy() * 255).astype('uint8')
+            mask_pil = Image.fromarray(mask_np)
+            mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+            mask = torch.from_numpy(np.array(mask_pil).astype(np.float32) / 255.0)
+
+        # Apply intensity and ceiling
+        mask = torch.clamp(mask * intensity, 0, ceiling)
+        
+        # Invert if requested
+        if invert:
+            mask = 1 - mask
+            
+        return mask
+
+    def create_preview(self, image, mask):
+        # Create an RGBA preview with the mask as alpha channel
+        if len(image.shape) == 2:
+            image = image.unsqueeze(0).repeat(3, 1, 1)
+        preview = image.clone()
+        preview = torch.cat([preview, mask.unsqueeze(0)], dim=0)
+        return preview
+
+    def merge_segments(self, image, segments_to_merge_str, model_name, normalize_mask=True, 
+                      binary_mask=False, resize_mode="bilinear", invert_mask=False, 
+                      show_preview=True, blur_radius=5, dilation_radius=5, 
+                      intensity=1.0, ceiling=1.0):
+        show_on_node = False
     
         try:
             self.processor = SegformerImageProcessor.from_pretrained(model_name)
@@ -342,54 +400,57 @@ class SegformerNodeMergeSegments:
         upsampled_logits = nn.functional.interpolate(
             logits,
             size=img.size[::-1],
-            mode="bilinear",
-            align_corners=False,
+            mode=resize_mode,
+            align_corners=False if resize_mode != "nearest" else None,
         )
 
-        pred_seg = upsampled_logits.argmax(dim=1)[0].numpy() 
+        pred_seg = upsampled_logits.argmax(dim=1)[0].numpy()
         unique_segments = np.unique(pred_seg)
 
-        segments_to_merge = list(map(int, segments_to_merge_str.split(',')))
+        # Handle empty segments string
+        if not segments_to_merge_str.strip():
+            segments_to_merge = []
+        else:
+            segments_to_merge = [int(s.strip()) for s in segments_to_merge_str.split(',') if s.strip()]
 
         merged_mask = np.zeros_like(pred_seg, dtype=np.float32)
-
         merged_segments = []
+
         for segment in unique_segments:
             if segment in segments_to_merge:
                 mask = np.where(pred_seg == segment, 1, 0)
-                mask = nn.functional.interpolate(torch.from_numpy(mask.astype(np.float32))[None, None,], 
-                                              size=(img.height, img.width), 
-                                              mode="nearest")[0,0].numpy()
                 merged_mask = np.maximum(merged_mask, mask)
                 merged_segments.append(segment)
 
-        # Apply dilation if specified
-        if dilation_radius > 0:
-            struct = np.ones((2 * dilation_radius + 1, 2 * dilation_radius + 1))
-            merged_mask = binary_dilation(merged_mask, structure=struct).astype(np.float32)
+        # Convert to tensor and process
+        merged_mask = torch.from_numpy(merged_mask)
+        merged_mask = self.process_mask(
+            merged_mask,
+            normalize=normalize_mask,
+            binary=binary_mask,
+            invert=invert_mask,
+            blur_radius=blur_radius,
+            dilation_radius=dilation_radius,
+            intensity=intensity,
+            ceiling=ceiling
+        )
 
-        # Apply Gaussian blur for feathering
-        if blur_radius > 0:
-            merged_mask_pil = Image.fromarray((merged_mask * 255).astype('uint8'))
-            merged_mask_pil = merged_mask_pil.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-            merged_mask = np.array(merged_mask_pil).astype(np.float32) / 255.0
-
-        # Apply intensity and ceiling
-        merged_mask = np.clip(merged_mask * intensity, 0, ceiling)
-
-        # Convert mask to tensor
-        merged_mask = torch.from_numpy(merged_mask).float()
+        # Create preview if requested
+        preview = self.create_preview(image[0], merged_mask) if show_preview else None
 
         # Apply mask to image
-        merged_image = np.array(img) * merged_mask.numpy()[..., None]
-        merged_image_pil = Image.fromarray(merged_image.astype('uint8'))
-        img2 = torch.from_numpy(np.array(merged_image_pil).astype(np.float32) / 255.0)[None,]
+        merged_image = image[0].cpu().numpy() * merged_mask.numpy()[..., None]
+        merged_image = torch.from_numpy(merged_image).unsqueeze(0)
 
         merged_segments_str = ','.join(map(str, merged_segments))
+        if not merged_segments:
+            merged_segments_str = "No segments selected"
 
-        output_ui =  {"images": [img2]} if show_on_node else {}
+        output_ui = {"images": [merged_image]} if show_on_node else {}
 
-        return {"result": (img2, merged_mask, merged_segments_str), "ui": output_ui}
+        return {"result": (merged_image, merged_mask, merged_segments_str, 
+                preview if preview is not None else merged_image), 
+                "ui": output_ui}
 
     
     
