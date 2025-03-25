@@ -9,7 +9,7 @@ from scipy.ndimage import binary_dilation
 
 
 model_names = [
-                "enes361/segformer_b2_clothes",
+                "sayeed99/segformer_b3_clothes",
                 "mattmdjaga/segformer_b0_clothes",
                 "mattmdjaga/segformer_b2_clothes",
                 "DiTo97/binarization-segformer-b3",
@@ -24,17 +24,24 @@ model_names = [
 class SegformerNode:
     @classmethod
     def INPUT_TYPES(cls):
-        global model_names  # Assuming model_names is a list of model names
+        global model_names
         return {
             "required": {
                 "image": ("IMAGE", {"default": None}),
                 "model_name": (model_names, {"default": model_names[0]}),
-            
-
+                "normalize_mask": ("BOOLEAN", {"default": True}),
+                "binary_mask": ("BOOLEAN", {"default": False}),
+                "resize_mode": (["nearest", "bilinear", "bicubic"], {"default": "bilinear"}),
+                "invert_mask": ("BOOLEAN", {"default": False}),
+                "show_preview": ("BOOLEAN", {"default": True}),
+                "return_individual_masks": ("BOOLEAN", {"default": False}),
+                "post_process": (["none", "erode", "dilate", "smooth"], {"default": "none"}),
+                "post_process_radius": ("INT", {"default": 3, "min": 1, "max": 10}),
+                "segment_groups": ("STRING", {"default": "", "multiline": True}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE","MASK", "STRING")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "IMAGE")  # Added IMAGE for preview
     FUNCTION = "segment_image"
     CATEGORY = "LexTools/ImageProcessing/Segmentation"
 
@@ -43,27 +50,128 @@ class SegformerNode:
         # self.processor = SegformerImageProcessor.from_pretrained("mattmdjaga/segformer_b2_clothes")
         # self.model = AutoModelForSemanticSegmentation.from_pretrained("mattmdjaga/segformer_b2_clothes")
         
-    def segment_image(self, image,model_name,):
+    def process_mask(self, mask, normalize=True, binary=False, invert=False, post_process="none", radius=3):
+        # Convert to float32 if not already
+        mask = mask.float()
+        
+        # Normalize to 0-1 range if requested
+        if normalize:
+            mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-8)
+        
+        # Convert to binary if requested
+        if binary:
+            mask = (mask > 0.5).float()
+        
+        # Apply post-processing
+        if post_process != "none":
+            kernel = torch.ones(2 * radius + 1, 2 * radius + 1)
+            if post_process == "erode":
+                mask = torch.nn.functional.conv2d(
+                    mask.unsqueeze(0).unsqueeze(0),
+                    kernel.unsqueeze(0).unsqueeze(0),
+                    padding=radius
+                ).squeeze() < kernel.sum()
+            elif post_process == "dilate":
+                mask = torch.nn.functional.conv2d(
+                    mask.unsqueeze(0).unsqueeze(0),
+                    kernel.unsqueeze(0).unsqueeze(0),
+                    padding=radius
+                ).squeeze() > 0
+            elif post_process == "smooth":
+                mask = torch.nn.functional.conv2d(
+                    mask.unsqueeze(0).unsqueeze(0),
+                    kernel.unsqueeze(0).unsqueeze(0),
+                    padding=radius
+                ).squeeze() / kernel.sum()
+            mask = mask.float()
+        
+        # Invert if requested
+        if invert:
+            mask = 1 - mask
+            
+        return mask
+
+    def create_preview(self, image, mask):
+        # Create an RGBA preview with the mask as alpha channel
+        preview = image.clone()
+        preview = torch.cat([preview, mask.unsqueeze(0)], dim=0)
+        return preview
+
+    def parse_segment_groups(self, groups_str):
+        if not groups_str.strip():
+            return {}
+        
+        groups = {}
+        for line in groups_str.split('\n'):
+            if ':' in line:
+                name, indices = line.split(':')
+                indices = [int(i.strip()) for i in indices.split(',') if i.strip()]
+                groups[name.strip()] = indices
+        return groups
+
+    def segment_image(self, image, model_name, normalize_mask=True, binary_mask=False, 
+                     resize_mode="bilinear", invert_mask=False, show_preview=True,
+                     return_individual_masks=False, post_process="none", 
+                     post_process_radius=3, segment_groups=""):
         show_on_node = False
         self.processor = SegformerImageProcessor.from_pretrained(model_name)
         self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name)
+        
+        # Process input image
         i = 255. * image[0].cpu().numpy()
         img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-        inputs   = self.processor(images=img, return_tensors="pt")
+        inputs = self.processor(images=img, return_tensors="pt")
 
+        # Get model outputs
         outputs = self.model(**inputs)
         logits = outputs.logits.cpu()
 
+        # Upsample logits with specified resize mode
         upsampled_logits = nn.functional.interpolate(
             logits,
             size=img.size[::-1],
-            mode="bilinear",
-            align_corners=False,
+            mode=resize_mode,
+            align_corners=False if resize_mode != "nearest" else None,
         )
 
         pred_seg = upsampled_logits.argmax(dim=1)[0]
+        
+        # Parse segment groups if provided
+        segment_groups_dict = self.parse_segment_groups(segment_groups)
+        
+        # Create individual masks if requested
+        individual_masks = {}
+        segment_info = []
+        
+        # Get unique segments and process each
+        unique_segments = np.unique(pred_seg.numpy())
+        for segment in unique_segments:
+            segment_name = self.model.config.id2label[segment]
+            segment_info.append(f"Segment {segment}: {segment_name}")
+            
+            if return_individual_masks:
+                mask = (pred_seg == segment).float()
+                mask = self.process_mask(mask, normalize_mask, binary_mask, 
+                                      invert_mask, post_process, post_process_radius)
+                individual_masks[segment_name] = mask
 
-        # Convert the matplotlib figure to a PIL Image and return it
+        # Create merged mask based on segment groups
+        if segment_groups_dict:
+            merged_mask = torch.zeros_like(pred_seg, dtype=torch.float32)
+            for group_name, indices in segment_groups_dict.items():
+                group_mask = torch.zeros_like(pred_seg, dtype=torch.float32)
+                for idx in indices:
+                    group_mask = torch.maximum(group_mask, (pred_seg == idx).float())
+                merged_mask = torch.maximum(merged_mask, group_mask)
+                segment_info.append(f"Group {group_name}: {indices}")
+        else:
+            merged_mask = torch.ones_like(pred_seg, dtype=torch.float32)
+
+        # Process the final mask
+        merged_mask = self.process_mask(merged_mask, normalize_mask, binary_mask, 
+                                      invert_mask, post_process, post_process_radius)
+
+        # Create visualization
         fig = plt.figure()
         plt.imshow(pred_seg)
         buf = io.BytesIO()
@@ -71,40 +179,26 @@ class SegformerNode:
         buf.seek(0)
         img2 = Image.open(buf)
         
+        # Convert visualization to tensor
         i = ImageOps.exif_transpose(img2)
         if i.getbands() != ("R", "G", "B", "A"):
             i = i.convert("RGBA")
-
-            
         img2 = np.array(img2).astype(np.float32) / 255.0
         img2 = torch.from_numpy(img2)[None,]
 
-        if 'A' in i.getbands():
-            mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
-            mask = 1. - torch.from_numpy(mask)
-        else:
-            mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")
-        # Get the unique segments in the image
-        unique_segments = np.unique(pred_seg)
+        # Create preview if requested
+        preview = self.create_preview(image[0], merged_mask) if show_preview else None
 
-        # Create a string with the information for each segment
-        segment_info = []
-        for segment in unique_segments:
-            # Get the name of the segment from the model's configuration
-            segment_name = self.model.config.id2label[segment]
-
-            # Here, you would replace these values with the actual accuracy and IoU for the segment
-
-
-            segment_info.append(f"Segment {segment}: {segment_name}")
-
-        # Join the segment info strings into a single string
+        # Join segment info
         segment_info_str = "\n".join(segment_info)
+        if return_individual_masks:
+            segment_info_str += "\n\nIndividual masks available for: " + ", ".join(individual_masks.keys())
 
+        output_ui = {"images": [img2]} if show_on_node else {}
 
-        output_ui =  {"images": [img2]} if show_on_node else {}
-
-        return {"result": (img2,mask, segment_info_str), "ui": output_ui}
+        # Return results
+        return {"result": (img2, merged_mask, segment_info_str, preview if preview is not None else img2), 
+                "ui": output_ui}
 
 class SegformerNodeMasks:
     @classmethod
@@ -195,12 +289,13 @@ class SegformerNodeMasks:
         merged_image_pil = Image.fromarray(merged_image)
         img2 = torch.from_numpy(np.array(merged_image_pil).astype(np.float32) / 255.0)[None,]
 
+        # Convert the merged mask to byte format (0-255) and ensure correct dimensionality
+        merged_mask = (merged_mask > 0).float()  # Convert to binary mask first
+        merged_mask = torch.clamp(merged_mask, 0, 1)
 
         output_ui =  {"images": [img2]} if show_on_node else {}
 
         return {"result": (img2, merged_mask, 'Merged Segments'), "ui": output_ui}
-    
-
 
 class SegformerNodeMergeSegments:
     @classmethod
@@ -211,11 +306,10 @@ class SegformerNodeMergeSegments:
                 "image": ("IMAGE", {"default": None}),
                 "segments_to_merge_str": ("STRING", {"default": ""}),
                 "model_name": (model_names, {"default": model_names[0]}),
-                "blur_radius": ("INT", {"default": 0}),
-                "dilation_radius": ("INT", {"default": 0}),  # Added dilation_radius
-                "intensity": ("FLOAT", {"default": 1.0}),  # Added intensity
-                "ceiling": ("FLOAT", {"default": 1.0}),  # Added ceiling
-
+                "blur_radius": ("INT", {"default": 5, "min": 0, "max": 100}),
+                "dilation_radius": ("INT", {"default": 5, "min": 0, "max": 100}),
+                "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+                "ceiling": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
             },
         }
 
@@ -228,8 +322,7 @@ class SegformerNodeMergeSegments:
     def __init__(self):
         pass
 
-    def merge_segments(self, image, segments_to_merge_str, model_name, blur_radius, dilation_radius, intensity, ceiling):  # Added dilation_radius in the arguments
-       
+    def merge_segments(self, image, segments_to_merge_str, model_name, blur_radius, dilation_radius, intensity, ceiling):
         show_on_node=False
     
         try:
@@ -258,43 +351,45 @@ class SegformerNodeMergeSegments:
 
         segments_to_merge = list(map(int, segments_to_merge_str.split(',')))
 
-        merged_mask = np.zeros_like(pred_seg)
+        merged_mask = np.zeros_like(pred_seg, dtype=np.float32)
 
         merged_segments = []
         for segment in unique_segments:
             if segment in segments_to_merge:
                 mask = np.where(pred_seg == segment, 1, 0)
-                mask = nn.functional.interpolate(torch.from_numpy(mask.astype(np.float32))[None, None,], size=(img.height, img.width), mode="nearest")[0,0].numpy() 
-
+                mask = nn.functional.interpolate(torch.from_numpy(mask.astype(np.float32))[None, None,], 
+                                              size=(img.height, img.width), 
+                                              mode="nearest")[0,0].numpy()
                 merged_mask = np.maximum(merged_mask, mask)
                 merged_segments.append(segment)
 
-        merged_mask = np.clip(merged_mask * intensity, 0, ceiling)  # Apply intensity and ceiling to the mask
-        if dilation_radius > 0:  # Dilate the mask if dilation_radius > 0
+        # Apply dilation if specified
+        if dilation_radius > 0:
             struct = np.ones((2 * dilation_radius + 1, 2 * dilation_radius + 1))
-            merged_mask = binary_dilation(merged_mask, structure=struct)
-        merged_mask_rgb = np.repeat(merged_mask[..., None], 3, axis=2)  
-        if blur_radius > 0:  # Blur the mask if radius > 0
-            merged_mask_rgb = Image.fromarray((merged_mask_rgb * 255).astype('uint8'))
-            merged_mask_rgb = merged_mask_rgb.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-            merged_mask_rgb = np.array(merged_mask_rgb) / 255.0
+            merged_mask = binary_dilation(merged_mask, structure=struct).astype(np.float32)
 
-        merged_image = np.array(img) * merged_mask_rgb
+        # Apply Gaussian blur for feathering
+        if blur_radius > 0:
+            merged_mask_pil = Image.fromarray((merged_mask * 255).astype('uint8'))
+            merged_mask_pil = merged_mask_pil.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+            merged_mask = np.array(merged_mask_pil).astype(np.float32) / 255.0
 
+        # Apply intensity and ceiling
+        merged_mask = np.clip(merged_mask * intensity, 0, ceiling)
+
+        # Convert mask to tensor
+        merged_mask = torch.from_numpy(merged_mask).float()
+
+        # Apply mask to image
+        merged_image = np.array(img) * merged_mask.numpy()[..., None]
         merged_image_pil = Image.fromarray(merged_image.astype('uint8'))
-        if blur_radius > 0:  # Apply blur if radius > 0
-            merged_image_pil = merged_image_pil.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-            
-        img2 = np.array(merged_image_pil).astype(np.float32) / 255.0
-        img2 = torch.from_numpy(img2).double()[None,]  
-
-        merged_mask_torch = torch.from_numpy(merged_mask).float()[None,]  # change from double to float
+        img2 = torch.from_numpy(np.array(merged_image_pil).astype(np.float32) / 255.0)[None,]
 
         merged_segments_str = ','.join(map(str, merged_segments))
 
         output_ui =  {"images": [img2]} if show_on_node else {}
 
-        return {"result": (img2, merged_mask_torch, merged_segments_str), "ui": output_ui}
+        return {"result": (img2, merged_mask, merged_segments_str), "ui": output_ui}
 
     
     
