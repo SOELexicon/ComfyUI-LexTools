@@ -8,7 +8,7 @@ A comprehensive toolkit for ComfyUI that provides advanced image processing, ana
 - Image quality scoring and filtering
 - Workflow utilities for seed management and image aspect ratio handling
 """
-version = "1.0.1"
+version = "1.0.2"
 license = "MIT"
 dependencies = [
     "torch>=2.0.0",
