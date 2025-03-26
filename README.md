@@ -46,13 +46,21 @@ ComfyUI-LexTools is a Python-based image processing and analysis toolkit that us
       - _Input_: `image` (IMAGE)
       - _Output_: Document type index and name.
    - `NSFWClassifierNode`: Classifies content safety levels.
-      - _Input_: `image` (IMAGE), `show_on_node` (BOOL)
+      - _Input_: `image` (IMAGE), `show_on_node` (BOOL), `threshold` (FLOAT)
       - _Output_: 
          - Classification report (STRING)
+         - SFW Score (FLOAT)
          - NSFW Score (FLOAT)
-         - Neutral Score (FLOAT)
-         - Sexy Score (FLOAT)
-         - Porn Score (FLOAT)
+         - Is SFW (BOOLEAN)
+         - Is NSFW (BOOLEAN)
+   - `WatermarkDetectionNode`: Detects watermarks in images using EfficientNet.
+      - _Input_: `image` (IMAGE), `show_on_node` (BOOL), `threshold` (FLOAT)
+      - _Output_:
+         - Classification report (STRING)
+         - Clean Score (FLOAT)
+         - Watermark Score (FLOAT)
+         - Is Clean (BOOLEAN)
+         - Has Watermark (BOOLEAN)
 
 3. **SegformerNode.py** - Handles semantic segmentation of images:
    - `SegformerNode`: Performs semantic segmentation with multiple model options.
@@ -82,12 +90,13 @@ The project requires the following Python libraries:
 - numpy
 - scipy
 - huggingface_hub
+- torchvision
 
 ## Installation
 
 1. Install the required Python packages:
 ```bash
-pip install torch transformers pillow matplotlib numpy scipy huggingface_hub
+pip install torch transformers pillow matplotlib numpy scipy huggingface_hub torchvision
 ```
 
 2. Clone this repository into your ComfyUI custom_nodes directory:
