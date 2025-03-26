@@ -289,7 +289,7 @@ class SegformerNode:
             import traceback
             print(f"Error in segmentation: {str(e)}")
             print(f"Traceback: {traceback.format_exc()}")
-            return {"result": (image, torch.zeros_like(image[0, :, :, 0]), f"Error: {str(e)}", image), 
+            return {"result": (image, torch.zeros_like(image[0, :, :]), f"Error: {str(e)}", image), 
                     "ui": {"images": [image]} if show_on_node else {}}
 
 class SegformerNodeMasks:
