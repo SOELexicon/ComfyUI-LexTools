@@ -240,60 +240,84 @@ class ImageFilterByFloatScoreNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "score": ("FLOAT", {"default": 0.0}),
-                "threshold": ("FLOAT", {"default": 0.0}),
-                "image": ("IMAGE", {"default": None}),
+                "image": ("IMAGE",),
+                "score": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0}),
+                "threshold": ("FLOAT", {"default": 5.0, "min": -100.0, "max": 100.0}),
+                "show_on_node": ("BOOLEAN", {"default": False}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "filter_image_by_score"
-    CATEGORY = "LexTools/ImageProcessing/Scores"
+    RETURN_TYPES = ("IMAGE", "FLOAT")
+    FUNCTION = "filter_image"
+    CATEGORY = "LexTools/ImageProcessing/Filtering"
 
-    def filter_image_by_score(self, score, threshold, image):
-        # If score > threshold, return the image, otherwise return None
-        if score < threshold:
-            pass
-        else:
-            return (image,) 
+    def filter_image(self, image, score, threshold, show_on_node):
+        try:
+            if float(score) >= float(threshold):
+                score_text = f"Score {score:.2f} >= Threshold {threshold:.2f}\nImage Passed"
+                output_ui = {"text": [score_text]} if show_on_node else {}
+                return {"result": (image, float(score)), "ui": output_ui}
+            else:
+                score_text = f"Score {score:.2f} < Threshold {threshold:.2f}\nImage Filtered"
+                output_ui = {"text": [score_text]} if show_on_node else {}
+                return {"result": (torch.zeros_like(image), float(score)), "ui": output_ui}
+        except Exception as e:
+            print(f"Error filtering image: {str(e)}")
+            return {"result": (image, 0.0), "ui": {"text": [str(e)]} if show_on_node else {}}
 
 class ImageQualityScoreNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "aesthetic_score": ("INT", {"default": None}),
-                "ai_score_artificial": ("FLOAT", {"default": None}),
-                "ai_score_human": ("FLOAT", {"default": None}),
-                "show_on_node": ("INT", {"default": 0}),
-            },
-            "optional": {
-                "image_score_good": ("FLOAT", {"default": 0}),
-                "image_score_bad": ("FLOAT", {"default": 0}),
-                "weight_good_score": ("FLOAT", {"default": 1}),
-                "weight_aesthetic_score": ("FLOAT", {"default": 1.0}),
-                "weight_bad_score": ("FLOAT", {"default": 1.0}),
-                "weight_AIDetection": ("FLOAT", {"default": 1.0}),
-                "weight_HumanDetection": ("FLOAT", {"default": 1.0}),
-                "MultiplyScoreBy": ("FLOAT", {"default": 100000}),
+                "aesthetic_score": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0}),
+                "image_score_good": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0}),
+                "image_score_bad": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0}),
+                "ai_score_artificial": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
+                "ai_score_human": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
+                "weight_good_score": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "weight_aesthetic_score": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "weight_bad_score": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "weight_AIDetection": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "weight_HumanDetection": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "MultiplyScoreBy": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0}),
+                "show_on_node": ("BOOLEAN", {"default": False}),
             },
         }
-    OUTPUT_NODE = True
 
     RETURN_TYPES = ("FLOAT",)
     FUNCTION = "calculate_score"
-    CATEGORY = "LexTools/ImageProcessing/Scores"
+    CATEGORY = "LexTools/ImageProcessing/Scoring"
 
-    def calculate_score(self, image_score_good, image_score_bad, aesthetic_score, ai_score_artificial, ai_score_human,weight_good_score,weight_aesthetic_score,weight_bad_score,weight_AIDetection,MultiplyScoreBy,show_on_node,weight_HumanDetection):
-        # Define the weights and maximum possible values
-        maxA, maxB, maxC = 3, 3, 1000
-        # Compute the exponential effect of the AI score
-        ai_score_artificial_exp = 10 ** ai_score_artificial
-        # Compute the final score according to the provided formula
-        final_score = ((((((image_score_good + maxA) / (2 * maxA) * weight_good_score) + (aesthetic_score / maxC) * weight_bad_score) / (weight_good_score + weight_bad_score)) - weight_aesthetic_score * ((image_score_bad + maxB) / (2 * maxB))) * ((weight_HumanDetection * (ai_score_human))-( weight_AIDetection* (ai_score_artificial_exp)))) * MultiplyScoreBy
+    def calculate_score(self, aesthetic_score, image_score_good, image_score_bad, ai_score_artificial, ai_score_human,
+                       weight_good_score, weight_aesthetic_score, weight_bad_score, weight_AIDetection, weight_HumanDetection,
+                       MultiplyScoreBy, show_on_node):
+        try:
+            # Calculate weighted scores
+            weighted_aesthetic = float(aesthetic_score) * weight_aesthetic_score
+            weighted_good = float(image_score_good) * weight_good_score
+            weighted_bad = float(image_score_bad) * weight_bad_score
+            weighted_ai = float(ai_score_artificial) * weight_AIDetection
+            weighted_human = float(ai_score_human) * weight_HumanDetection
 
-        # Prepare the output UI
-        return  (final_score, {"ui": {"STRING": [final_score]}})
+            # Calculate total score
+            total_score = (weighted_aesthetic + weighted_good - weighted_bad + weighted_human - weighted_ai) * MultiplyScoreBy
+
+            # Format score for display
+            score_text = f"Score: {total_score:.2f}\n"
+            score_text += f"Aesthetic (w:{weight_aesthetic_score:.1f}): {aesthetic_score:.2f}\n"
+            score_text += f"Good (w:{weight_good_score:.1f}): {image_score_good:.2f}\n"
+            score_text += f"Bad (w:{weight_bad_score:.1f}): {image_score_bad:.2f}\n"
+            score_text += f"AI (w:{weight_AIDetection:.1f}): {ai_score_artificial:.2f}\n"
+            score_text += f"Human (w:{weight_HumanDetection:.1f}): {ai_score_human:.2f}\n"
+            score_text += f"Multiplier: {MultiplyScoreBy:.1f}"
+
+            output_ui = {"text": [score_text]} if show_on_node else {}
+
+            return {"result": (float(total_score),), "ui": output_ui}
+        except Exception as e:
+            print(f"Error calculating score: {str(e)}")
+            return {"result": (0.0,), "ui": {"text": [str(e)]} if show_on_node else {}}
 
 
 #

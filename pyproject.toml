@@ -1,15 +1,39 @@
 [project]
 name = "comfyui-lextools"
-description = "ComfyUI-LexTools is a Python-based image processing and analysis toolkit that uses machine learning models for semantic image segmentation, image scoring, and image captioning."
-version = "1.0.1"
-license = "LICENSE"
-dependencies = ["numpy", "opencv-python", "git+https://github.com/facebookresearch/detectron2.git", "pyodbc"]
+description = """
+A comprehensive toolkit for ComfyUI that provides advanced image processing, analysis, and AI-powered features:
+- Semantic segmentation with multiple pre-trained models and mask processing
+- Image classification (age, food, documents, NSFW content, AI detection)
+- Image captioning using BLIP
+- Image quality scoring and filtering
+- Workflow utilities for seed management and image aspect ratio handling
+"""
+version = "1.0.2"
+license = "MIT"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "Pillow>=9.0.0",
+    "matplotlib>=3.0.0",
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "huggingface_hub>=0.19.0"
+]
 
 [project.urls]
 Repository = "https://github.com/SOELexicon/ComfyUI-LexTools"
-#  Used by Comfy Registry https://comfyregistry.org
+Documentation = "https://github.com/SOELexicon/ComfyUI-LexTools/blob/main/README.md"
 
 [tool.comfy]
 PublisherId = "lexicon"
 DisplayName = "ComfyUI-LexTools"
-Icon = ""
+Description = "Advanced image processing and AI analysis toolkit for ComfyUI"
+Icon = "🛠️"
+Tags = [
+    "image processing",
+    "segmentation",
+    "classification",
+    "captioning",
+    "workflow",
+    "utilities"
+]
