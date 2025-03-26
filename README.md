@@ -26,7 +26,7 @@ ComfyUI-LexTools is a Python-based image processing and analysis toolkit that us
 
    Additional nodes from [GitHub Pages](https://github.com/strimmlarn/ComfyUI-Strimmlarns-Aesthetic-Score/) - These have been modified to improve performance and add an option to store the model in RAM, which significantly reduces generation time:
    - `CalculateAestheticScore`: An optimized version of the original, with an option to keep the model loaded in RAM.
-   - `AesthetlcScoreSorter`: Sorts the images by score.
+   - `AestheticScoreSorter`: Sorts the images by score.
    - `AesteticModel`: Loads the aesthetic model.
 
 2. **ImageCaptioningNode.py** - Implements nodes for image captioning and classification:
