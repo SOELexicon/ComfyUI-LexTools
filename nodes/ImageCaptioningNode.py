@@ -1,6 +1,6 @@
 import time
 import torch
-from transformers import BlipProcessor,AutoModel, BlipForConditionalGeneration,AutoFeatureExtractor,AutoModelForImageClassification,ViTFeatureExtractor, ViTForImageClassification, AutoModelForImageClassification
+from transformers import BlipProcessor,AutoModel, BlipForConditionalGeneration,AutoFeatureExtractor,AutoModelForImageClassification,ViTImageProcessor, ViTForImageClassification, AutoModelForImageClassification
 from PIL import Image
 import numpy as np
 from scipy.ndimage import binary_dilation
@@ -95,7 +95,7 @@ class AgeClassifierNode:
     CATEGORY = "LexTools/ImageProcessing/Classification"
 
     def __init__(self):
-        self.feature_extractor = ViTFeatureExtractor.from_pretrained('nateraw/vit-age-classifier')
+        self.feature_extractor = ViTImageProcessor.from_pretrained('nateraw/vit-age-classifier')
         self.model = ViTForImageClassification.from_pretrained('nateraw/vit-age-classifier')
 
     def classify_age(self, image):
@@ -144,7 +144,7 @@ class ArtOrHumanClassifierNode:
 
     def __init__(self):
         if not ArtOrHumanClassifierNode.feature_extractor:
-            ArtOrHumanClassifierNode.feature_extractor = ViTFeatureExtractor.from_pretrained("umm-maybe/AI-image-detector")
+            ArtOrHumanClassifierNode.feature_extractor = ViTImageProcessor.from_pretrained("umm-maybe/AI-image-detector")
 
         if not ArtOrHumanClassifierNode.model:
             ArtOrHumanClassifierNode.model = AutoModelForImageClassification.from_pretrained("umm-maybe/AI-image-detector")
